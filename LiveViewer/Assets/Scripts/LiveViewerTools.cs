@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -30,6 +30,13 @@ public class LiveViewerTools
     public PrefData prefData;
     public SaveData saveData;
     public PresetData presetData;
+
+    /// <summary>
+    /// User-selected root directory for save files.
+    /// If set, all paths are resolved relative to this directory.
+    /// This allows working with manually-copied save folders on Android 13+ without root.
+    /// </summary>
+    public static string SelectedSaveRoot { get; set; }
 
     public static string WorkingDir =>
 #if !UNITY_EDITOR&&UNITY_ANDROID
@@ -98,19 +105,17 @@ public class LiveViewerTools
                 Tool.Call("CopyAllFiles");
             }
         }
-        //try
-        //{
-        //    CopyEntireDir(EXT_PRESISTDATA_PATH, Application.persistentDataPath);
-        //}
-        //catch (Exception e)
-        //{
-        //    Debug.LogException(e);
-        //}
-
     }
 
     public bool CopyBackFile(string file)
     {
+        // On Android 13+, skip root-based write back if using SelectedSaveRoot
+        if (!string.IsNullOrEmpty(SelectedSaveRoot))
+        {
+            // File is already in SelectedSaveRoot, no need to copy back
+            return true;
+        }
+
         try
         {
             File.Copy(file, file.Replace(Application.identifier, PACKAGE_NAME));
@@ -119,12 +124,27 @@ public class LiveViewerTools
         catch (Exception e)
         {
             Debug.LogException(e);
-            return Tool.Call<bool>("CopyBack", file);
+            // Only try root command if no selected root is set
+            if (string.IsNullOrEmpty(SelectedSaveRoot))
+            {
+                return Tool.Call<bool>("CopyBack", file);
+            }
+            return false;
         }
-
-        //File.Copy(Application.persistentDataPath + "/" + file, EXT_PRESISTDATA_PATH);
     }
 #endif
+
+    /// <summary>
+    /// Resolves a relative path against SelectedSaveRoot if set, otherwise against WorkingDir.
+    /// </summary>
+    public static string ResolvePath(string relativePath)
+    {
+        if (!string.IsNullOrEmpty(SelectedSaveRoot))
+        {
+            return Path.Combine(SelectedSaveRoot, relativePath);
+        }
+        return Path.Combine(WorkingDir, relativePath);
+    }
 
     public static void CopyEntireDir(string sourcePath, string destPath)
     {
@@ -159,25 +179,6 @@ public class LiveViewerTools
         return null;
     }
 
-    /* 已弃用
-    [Obsolete]
-    public PrefData ReadPlayerPrefDataFromXml(string path = PLAYERPREFS_PATH)
-    {
-        playerPrefsDocument = ReadXml(path);
-        string data = "";
-        XmlNode map = playerPrefsDocument.SelectSingleNode("map");
-        dataNode = FindElement(map, "data");
-#if UNITY_5_3_OR_NEWER
-        data = WWW.UnEscapeURL(FindElement(map, "data").InnerText);
-#else
-        data = WebUtility.UrlDecode(FindElement(map, "data").InnerText);
-#endif
-        data = JJJLMMOLDJJ.IOAMJKJJOJO(data);
-        Console.WriteLine(data);
-        prefData = LoadPrefData(data);
-        return prefData;
-    }
-    */
     public PrefData LoadPrefData(string json)
     {
         prefData = Serializer.Deserialize<PrefData>(json, false, false);
@@ -190,66 +191,24 @@ public class LiveViewerTools
         return state;
     }
 
-    /*
-    //已弃用
-    [Obsolete]
-    public bool SavePlayerPrefData(PrefData newData = null)
-    {
-        try
-        {
-            if (newData == null)
-            {
-                newData = prefData;
-            }
-            string data = JJJLMMOLDJJ.ICLIEPENIGG(Serializer.Serialize(newData, true));
-#if UNITY_5_3_OR_NEWER
-            data = WWW.EscapeURL(data);
-#else
-            data = WebUtility.UrlEncode(data);
-#endif
-
-            Console.WriteLine(data);
-            dataNode.InnerText = data;
-#if UNITY_ANDROID
-            string newpath = Application.persistentDataPath + "/" + Path.GetFileName(path);
-
-            dataNode.OwnerDocument.Save(newpath);
-            string command = string.Format("cp -rf {0} {1}", newpath, path);
-            bool root = ToolClass.Call<bool>("RootCommand", command);
-            //new Thread(() =>
-            //{
-            //    Thread.Sleep(100);
-            //    if (File.Exists(newpath))
-            //    {
-
-            //        File.Delete(newpath);
-            //    }
-            //}).Start();
-            return root;
-#else
-            dataNode.OwnerDocument.Save(path);
-            return true;
-#endif
-        }
-        catch (Exception e)
-        {
-            return false;
-        }
-
-        return false;
-    }
-    */
     public string ReadDatString(string file)
     {
-        if (!File.Exists(file))
+        // Resolve path against SelectedSaveRoot if set, otherwise check file exists
+        string fullPath = ResolvePath(file);
+        if (!File.Exists(fullPath))
         {
-            file = WorkingDir + "/" + file;
+            // Fallback: try as absolute path if ResolvePath didn't resolve it
+            if (!File.Exists(file))
+            {
+                throw new FileNotFoundException($"File not found: {fullPath}");
+            }
+            fullPath = file;
         }
-        byte[] numArray = File.ReadAllBytes(file);
+
+        byte[] numArray = File.ReadAllBytes(fullPath);
         TransCodeByteArray(numArray);
         string data = Encoding.UTF8.GetString(numArray);
         string prittyJsonString = PrittyJsonString(data);
-        //File.WriteAllText(WorkingDir + "/" + file + ".json", prittyJsonString);
         return prittyJsonString;
     }
 
@@ -260,7 +219,6 @@ public class LiveViewerTools
         {
             data[i] = (byte)((data.Length & 255) ^ (int)data[i]);
         }
-
     }
 
     public void SaveDat(object obj, string file)
@@ -271,17 +229,29 @@ public class LiveViewerTools
         });
         SaveDatString(json, file);
     }
+
     public bool SaveDatString(string data, string file)
     {
-        if (!file.Contains(WorkingDir))
+        string fullPath = ResolvePath(file);
+        
+        // Ensure directory exists
+        string dirPath = Path.GetDirectoryName(fullPath);
+        if (!Directory.Exists(dirPath))
         {
-            file = WorkingDir + "/" + file;
+            Directory.CreateDirectory(dirPath);
         }
+
         byte[] bytes = Encoding.UTF8.GetBytes(data);
         TransCodeByteArray(bytes);
-        File.WriteAllBytes(file, bytes);
+        File.WriteAllBytes(fullPath, bytes);
+
 #if UNITY_ANDROID
-        return CopyBackFile(file);
+        // If using SelectedSaveRoot, skip root-based copy back
+        if (!string.IsNullOrEmpty(SelectedSaveRoot))
+        {
+            return true;
+        }
+        return CopyBackFile(fullPath);
 #else
         return true;
 #endif
@@ -370,8 +340,6 @@ public class Serializer
             TypeNameHandling = TypeNameHandling.All
         });
     }
-
-
 }
 public class SerializationBinder : DefaultSerializationBinder
 {
